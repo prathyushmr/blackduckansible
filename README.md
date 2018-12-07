@@ -1,6 +1,7 @@
 # blackduckansible
 
-```variable are set in /opt/list.yml
+variable are set in /opt/list.yml
+```
 file_path: /root/downloads/
 master1: 93.183.26.164
 master2: 93.183.26.165
