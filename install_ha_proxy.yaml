@@ -1,0 +1,278 @@
+---
+- name: INSTALL HA PROXY AND CONFIGURE
+  hosts: ha_proxy_server
+  vars_files: /opt/list.yml
+  tasks:
+   - name: Install the HA proxy RPM
+     yum:
+       name: haproxy-1.7.9-1.el7.x86_64
+       state: present
+   - name: Configure HA proxy configuration file
+     blockinfile:
+       path: /etc/haproxy/test.cfg
+       block: |
+             frontend kubernetes
+              bind *:6443
+              option tcplog
+              mode tcp
+              default_backend kubernetes-master-nodes
+              backend kubernetes-master-nodes
+              mode tcp
+              balance roundrobin
+              option tcp-check
+              server bdkm1 {{ master1 }}:6443 check fall 3 rise 2
+              server bdkm2 {{ master2 }}:6443 check fall 3 rise 2
+              server bdkm3 {{ master3 }}:6443 check fall 3 rise 2
+     notify:
+     - restart haproxy
+   - name: Downloading the cfssl and generate the certificates  from the HA proxy server
+     get_url:
+         url: https://pkg.cfssl.org/R1.2/cfssl_linux-amd64
+         dest: /usr/local/bin/cfssl
+         mode: 0755
+   - name: Download the cfssl
+     get_url:
+         url: https://pkg.cfssl.org/R1.2/cfssljson_linux-amd64
+         dest: /usr/local/bin/cfssljson
+         mode: 0755
+   - name:  Generate the certificate authority certificate and private key
+     shell: cd {{ file_path }} ;cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+   - name: Creating the certificate for the Etcd cluster
+     shell: cd {{ file_path }} ; cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -hostname={{ master1 }},{{ master2 }},{{ master3 }},{{ ha_proxy }},127.0.0.1,kubernetes.default -profile=kubernetes kubernetes-csr.json | cfssljson -bare kubernetes
+   - name: Copy the certificates to Masters and Worker nodes
+     shell: scp {{ file_path }}*pem root@{{ item }}:~
+     with_items:
+          - "{{ master1 }}"
+          - "{{ master2 }}"
+          - "{{ master3 }}"
+
+
+  handlers:
+     - name: restart haproxy
+       service:
+         name: haproxy
+         state: restarted
+
+
+#  Preparing the nodes for kubeadm
+# Install Docker,kubeadm, kublet, and kubectl in Master nodes
+
+- name: Install Docker,kubeadm, kublet, and kubectl in Master nodes
+  hosts: master_nodes,worker_nodes
+  tasks:
+    - name: Install docker,kubernets tools in Master and worker nodes
+      yum:
+        name:
+          - docker-engine-17.03.0.ce-1.el7.centos.x86_64
+          - kubectl-1.11.3-0.x86_64
+          - kubeadm-1.11.3-0.x86_64
+          - kubelet-1.11.3-0.x86_64
+        state: present
+    - name: Make swap off  in all Mater and Worker nodes
+      shell: swapoff -a
+    - name: Remove Swap entry from /etc/fstab
+      lineinfile:
+        dest: /etc/fstab
+        state:  absent
+        regex: 'swap'
+        backup: yes
+
+#Installing and configuring Etcd
+- name: Installing and configuring Etcd
+  hosts: master_nodes
+  vars_files: /opt/list.yml
+  tasks:
+    - name: Clean existing entries for a fresh database
+      file:
+        path: /var/lib/etcd
+        state: absent
+    - name: Create a configuration directory for Etcd
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: 0755
+      with_items:
+          -  /etc/etcd
+          -  /var/lib/etcd
+    - name: Copy the pem files to the destinations
+      copy:
+        src: /root/{{ item }}
+        dest: /etc/etcd/
+        owner: root
+        group: root
+        mode: 0644
+        remote_src: yes
+      with_items:
+          - ca.pem
+          - kubernetes.pem
+          - kubernetes-key.pem
+    - name: Copy the the etcd tar ball from thefile repo to the master nodes
+      copy:
+        src: "{{ file_path }}{{ etcd_tar_file }}"
+        dest: /opt/
+    - name: Create a folder to extract
+      file:
+        path: /opt/etcd
+        state: directory
+        mode: 0755
+    - name: Extract the etcd tar file
+      unarchive:
+        src: /opt/{{ etcd_tar_file }}
+        dest: /opt/etcd
+        remote_src: yes
+    - name: Stop etcd service if running
+      systemd:
+        name: etcd
+        state: stopped
+    - name: Move the etcd binaries to /usr/local/bin/
+      shell: cp -r /opt/{{ etcd_dir }}/etcd* /usr/local/bin/
+- name: Genereate the etcd.service and copy to Master servers
+  hosts: master1
+  vars_files: /opt/list.yml
+  vars:
+     ip1: 93.183.26.164
+     ip2: 93.183.26.165
+     ip3: 93.183.26.166
+  tasks:
+     - name: Copy the etcd.service to {{ master1 }}
+       template:
+         src: "{{ file_path }}{{ etcd_j2_file }}"
+         dest: /etc/systemd/system/etcd.service
+- name: Genereate the etcd.service and copy to Master server2
+  hosts: master2
+  vars_files: /opt/list.yml
+  vars:
+     ip1: 93.183.26.165
+     ip2: 93.183.26.164
+     ip3: 93.183.26.166
+  tasks:
+     - name: Copy the etcd.service to {{ master2 }}
+       template:
+         src: "{{ file_path }}{{ etcd_j2_file }}"
+         dest: /etc/systemd/system/etcd.service
+- name: Genereate the etcd.service and copy to Master server2
+  hosts: master3
+  vars_files: /opt/list.yml
+  vars:
+     ip1: 93.183.26.166
+     ip2: 93.183.26.164
+     ip3: 93.183.26.165
+  tasks:
+     - name: Copy the etcd.service to {{ master2 }}
+       template:
+         src: "{{ file_path }}{{ etcd_j2_file }}"
+         dest: /etc/systemd/system/etcd.service
+- name: Issue daemon-reload to pick up config changes
+  hosts: master_nodes
+  tasks:
+     - name: Reload etcd service
+       systemd:
+           state: restarted
+           enabled: yes
+           daemon_reload: yes
+           name: etcd
+# Reset all Master and worker nodes
+- name: Reset Master and worker nodes
+  hosts: master_nodes,worker_nodes
+  tasks:
+    - name: Rerset master and worker nodes
+      shell:  kubeadm reset -f
+## Initializing the master nodes
+- name: Initilizing the Master nodes
+  hosts: master_nodes
+  vars_files: /opt/list.yml
+  tasks:
+
+    - name: Copy the config.ym to all the Master nodes
+      template:
+        src: "{{ file_path }}{{ config_j2_file }}"
+        dest: /var/tmp/config.yaml
+- name: Initializing the Mater 1
+  hosts: master1
+  vars_files: /opt/list.yml
+  tasks:
+     - name: Init with kubeadm
+       shell: kubeadm init --config=/var/tmp/config.yaml
+       register: init_out1
+     - name: Copy the certificates to the two other masters 2 and 3
+       shell: scp  -r /etc/kubernetes/pki root@{{ item }}:/var/tmp/
+       with_items:
+           - "{{ master2 }}"
+           - "{{ master3 }}"
+- name: Copy the PKI crt file to  /etc/kubernetes directory
+  hosts: master2,master3
+  tasks:
+    - name: remove the apiserver.crt and apiserver.key
+      shell: rm -rf /var/tmp/pki/apiserver.*
+    - name: Copy to /etc/kubernetes
+      shell: cp -r /var/tmp/pki /etc/kubernetes/
+- name: Initialize master2 as Initialize the machine as a master node
+  hosts: master2
+  tasks:
+    - name: Initialize master2
+      shell: kubeadm init --config=/var/tmp/config.yaml
+      register: init_out2
+- name: Initialize master3 as master node
+  hosts: master3
+  tasks:
+    - name: Init master3
+      shell: kubeadm init --config=/var/tmp/config.yaml
+      register: init_out3
+    - name: Set the Image as fact
+      set_fact:
+        init_command: "{{ init_out3.stdout_lines | last }}"
+    - name: Save the command
+      shell: echo "{{ init_command }}" > /tmp/command
+    - name: Fetch the file to ansible master
+      fetch:
+         src: /tmp/command
+         dest: /tmp/
+         flat: yes
+- name: Copy /tmp/command to worker nodes
+  hosts: worker_nodes
+  tasks:
+    - name: Copy to worker nodes
+      copy:
+        src: /tmp/command
+        dest: /tmp/command
+
+
+#Initializing the worker nodes
+- name: Initialize the worker nodes
+  hosts: worker_nodes
+  tasks:
+    - name: SET EXE PERMISSION
+      shell: chmod 755 /tmp/command
+    - name: INITIALIZE WORKER NODES BY JOINING THE CLUSTER
+      shell: sh /tmp/command
+#Configuring kubectl on the client machine
+
+- name: Pull the admin.conf from the master
+  hosts: master1
+  tasks:
+     - name: change the permission of /etc/kubernetes/admin.conf
+       shell: chmod +r /etc/kubernetes/admin.conf
+     - name: Fetch /etc/kubernetes/admin.conf to HA
+       fetch:
+          src: /etc/kubernetes/admin.conf
+          dest: /tmp/
+          flat: yes
+- name: Set the kubadm in HA
+  hosts: ha_proxy_server
+  tasks:
+    - name: Create .kube
+      file:
+        path: ~/.kube
+        state: directory
+        mode: 0755
+    - name: Copy to config
+      copy:
+        src: /tmp/admin.conf
+        dest: ~/.kube/config
+# Deploying the overlay network
+
+- name: Deploying the overlay network
+  hosts: ha_proxy_server
+  tasks:
+    - name: Deploying the overlay network
+      shell: kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
