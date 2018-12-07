@@ -1,6 +1,6 @@
 # blackduckansible
 
-variable are set in /opt/list.yml
+'''variable are set in /opt/list.yml
 file_path: /root/downloads/
 master1: 93.183.26.164
 master2: 93.183.26.165
@@ -13,3 +13,4 @@ etcd_tar_file: etcd-v3.3.9-linux-amd64.tar.gz
 etcd_dir: etcd-v3.3.9-linux-amd64
 etcd_j2_file: etcd_service.j2
 config_j2_file: config.yaml.j2
+'''
